@@ -1,0 +1,674 @@
+---
+title: "Holobiont Population Genetics — Analysis Report"
+author: "William Pearman"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    code_folding: show
+    df_print: paged
+    theme: flatly
+  github_document:
+    toc: true
+    toc_depth: 3
+params:
+  importance_results_dir:
+    label: "Path to importance-mutation results dir (containing extracted_varratio/ and extracted_seff/)"
+    value: "results_importance_mutation_standard_rerun"
+  standard_aggregated_data:
+    label: "Path to combined_data_all_aggregated.RDS from the standard sweep (or '' to skip standard plots)"
+    value: ""
+  env_file:
+    label: "Path to env_list_rerun.RDS"
+    value: "data/env_list_rerun.RDS"
+  late_window:
+    label: "Final-generations window for the importance-mutation late summaries"
+    value: 500
+  fig_dir:
+    label: "Where to save figure PNGs (created if missing)"
+    value: "figures_rmd"
+  save_figures:
+    label: "Save high-resolution PNGs alongside the HTML?"
+    value: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo       = TRUE,
+  message    = FALSE,
+  warning    = FALSE,
+  fig.align  = "center",
+  fig.width  = 9,
+  fig.height = 5,
+  dpi        = 110
+)
+
+IMP_DIR        <- params$importance_results_dir
+STD_DATA_FILE  <- params$standard_aggregated_data
+ENV_FILE       <- params$env_file
+LATE_WIN       <- params$late_window
+FIG_DIR        <- params$fig_dir
+SAVE_FIGURES   <- isTRUE(params$save_figures)
+
+if (SAVE_FIGURES) dir.create(FIG_DIR, showWarnings = FALSE, recursive = TRUE)
+
+run_standard_section <- nzchar(STD_DATA_FILE) && file.exists(STD_DATA_FILE)
+```
+
+# Overview
+
+This report reproduces the analysis figures from the holobiont
+population-genetics simulation sweep, working from the *intermediate
+extracted data* produced by the SLURM extraction array jobs and (for the
+standard sweep) the aggregated per-generation dataset.
+
+It is split into two sections that mirror the two experiments in the
+repo:
+
+1. **Importance mutation** (`importance_mutation/`) — sweeps vertical
+   inheritance × env-change-rate at fixed initial importance = 0, with
+   importance allowed to mutate. Inputs: per-combo extracted summaries
+   in `extracted_varratio/` and `extracted_seff/` under the results dir.
+2. **Standard** (`standard/`) — sweeps vertical inheritance × env-change-rate
+   × *fixed* initial importance values. Input: `combined_data_all_aggregated.RDS`.
+
+To knit:
+
+```r
+rmarkdown::render(
+  "analysis/analysis_report.Rmd",
+  params = list(
+    importance_results_dir = "/nesi/nobackup/uoa04039/Holobiont_PopGen/Simulations_26Nov/simulations_pogen_heatwave/Rerun_sims_array_28Nov/Importance_Mutation/results_importance_mutation_standard_rerun",
+    standard_aggregated_data = "/nesi/nobackup/uoa04039/Holobiont_PopGen/Simulations_26Nov/simulations_pogen_heatwave/Rerun_sims_array_28Nov/combined_data_all_aggregated.RDS",
+    env_file="/nesi/nobackup/uoa04039/Holobiont_PopGen/Simulations_26Nov/simulations_pogen_heatwave/holobiont-popgen/data/env_list_rerun.RDS"
+  )
+)
+```
+
+The standard section is skipped automatically if
+`standard_aggregated_data` is empty or the file is missing.
+
+```{r libs}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(readr)
+  library(tidyr)
+  library(ggplot2)
+  library(patchwork)
+  library(broom)
+  library(knitr)
+  library(stringr)
+})
+
+theme_set(theme_bw(base_size = 10) +
+  theme(strip.background = element_rect(fill = "grey92"),
+        panel.grid.minor = element_blank()))
+```
+
+# Section A — Importance mutation experiment
+
+```{r imp-paths-check}
+varratio_dir <- file.path(IMP_DIR, "extracted_varratio")
+seff_dir     <- file.path(IMP_DIR, "extracted_seff")
+stopifnot(
+  "extracted_varratio/ not found" = dir.exists(varratio_dir),
+  "extracted_seff/ not found"     = dir.exists(seff_dir)
+)
+cat("Importance dir: ", normalizePath(IMP_DIR),  "\n",
+    "varratio dir:   ", varratio_dir,            "\n",
+    "seff dir:       ", seff_dir,                "\n", sep = "")
+```
+
+## A1. Load extracted per-combo files
+
+```{r imp-load}
+# Variance-ratio extracts
+varratio_files <- list.files(varratio_dir,
+                             pattern = "^combo_.*_varratio\\.RDS$",
+                             full.names = TRUE)
+cat(sprintf("Found %d varratio combo files\n", length(varratio_files)))
+
+var_data       <- lapply(varratio_files, read_rds)
+var_summary    <- bind_rows(lapply(var_data, `[[`, "summary")) %>%
+  filter(is.finite(evolved_imp), is.finite(delta_var_ratio)) %>%
+  mutate(NGen_label = paste0("NGen = ", NGen)) %>%
+  filter(EnvType %in% c("step_gen1", "step_gen5", "step_gen50"))
+var_trajectory <- bind_rows(lapply(var_data, `[[`, "trajectory")) %>%
+  filter(is.finite(var_ratio)) %>%
+  mutate(NGen_label = paste0("NGen = ", NGen)) %>%
+  filter(EnvType %in% c("step_gen1", "step_gen5", "step_gen50"))
+
+# Effective-selection extracts
+seff_files     <- list.files(seff_dir,
+                             pattern = "^combo_.*_seff\\.RDS$",
+                             full.names = TRUE)
+cat(sprintf("Found %d seff combo files\n", length(seff_files)))
+seff_data       <- lapply(seff_files, read_rds)
+seff_summary    <- bind_rows(lapply(seff_data, `[[`, "summary"))
+seff_trajectory <- bind_rows(lapply(seff_data, `[[`, "trajectory"))
+
+cat(sprintf("var_summary rows:    %d\nvar_trajectory rows: %d\n",
+            nrow(var_summary), nrow(var_trajectory)))
+cat(sprintf("seff_summary rows:    %d\nseff_trajectory rows: %d\n",
+            nrow(seff_summary), nrow(seff_trajectory)))
+```
+
+## A2. Late-window summaries
+
+```{r imp-late-summaries}
+late_ratio <- var_trajectory %>%
+  filter(importance_num == 0, selection_type == "Selective",
+         !(X == 1 & EnvType == "step_gen1")) %>%
+  group_by(combo_id, rep, NGen, X, EnvType, selection_type) %>%
+  filter(generation > (max(generation) - LATE_WIN)) %>%
+  summarise(
+    late_var_ratio = mean(var_ratio, na.rm = TRUE),
+    evolved_imp    = mean(mean_imp,  na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  filter(is.finite(late_var_ratio), is.finite(evolved_imp)) %>%
+  mutate(NGen_label = paste0("NGen = ", NGen))
+
+late_rescue <- var_summary %>%
+  filter(importance_num == 0, selection_type == "Selective",
+         !(X == 1 & EnvType == "step_gen1")) %>%
+  mutate(rescue_effect = late_fitness - late_nomicro_fitness,
+         NGen_label    = paste0("NGen = ", NGen)) %>%
+  filter(is.finite(rescue_effect), is.finite(evolved_imp))
+
+seff_late <- seff_trajectory %>%
+  filter(generation %in% (max(generation) - LATE_WIN + 1):max(generation)) %>%
+  group_by(importance_num, selection_type, EnvType, X, rep) %>%
+  summarise(
+    nominal_s = mean(as.numeric(S_host), na.rm = TRUE),
+    evol_imp  = mean(mean_imp,           na.rm = TRUE),
+    s_with    = mean(s_eff_with,         na.rm = TRUE),
+    s_without = mean(s_eff_without,      na.rm = TRUE),
+    s_ratio   = mean(s_ratio,            na.rm = TRUE),
+    .groups   = "drop"
+  ) %>%
+  arrange(importance_num) %>%
+  mutate(X = as.character(X))
+```
+
+## A3. Importance-trajectory plot
+
+```{r imp-traj-summary, fig.width=8, fig.height=4.5}
+imp_traj_summary <- var_trajectory %>%
+  filter(importance_num == 0, selection_type == "Selective") %>%
+  group_by(generation, X, EnvType, NGen_label) %>%
+  summarise(
+    mean_importance = mean(mean_imp, na.rm = TRUE),
+    sd_importance   = sd(mean_imp,   na.rm = TRUE),
+    n_reps          = n(),
+    .groups         = "drop"
+  ) %>%
+  mutate(se_importance = sd_importance / sqrt(n_reps),
+         lower_se = mean_importance - se_importance,
+         upper_se = mean_importance + se_importance)
+
+p_imp_traj <- imp_traj_summary %>%
+  filter(EnvType == "step_gen50") %>%
+  ggplot(aes(x = generation, y = mean_importance,
+             colour = factor(X), fill = factor(X), group = factor(X))) +
+  geom_ribbon(aes(ymin = lower_se, ymax = upper_se), alpha = 0.2, colour = NA) +
+  geom_line(linewidth = 0.7) +
+  geom_vline(xintercept = 2000, linetype = "dashed", colour = "grey50") +
+  scale_colour_brewer(palette = "Spectral",
+                      name = expression(Vertical~Inheritance~(italic(X)))) +
+  scale_fill_brewer(palette = "Spectral",
+                    name = expression(Vertical~Inheritance~(italic(X)))) +
+  labs(x = "Generation", y = "Mean Microbial Importance")
+p_imp_traj
+```
+
+## A4. Variance ratio vs evolved importance
+
+```{r p-late-ratio, fig.width=7, fig.height=4.5}
+p_late <- ggplot(late_ratio,
+                 aes(x = evolved_imp, y = late_var_ratio,
+                     group = NGen_label, shape = NGen_label, colour = NGen_label)) +
+  geom_point(size = 1.8, alpha = 0.6) +
+  geom_smooth(method = "lm", se = TRUE, linewidth = 0.9) +
+  scale_colour_discrete(name = "Microbial generations\nper host gen",
+                        labels = function(x) sub("NGen = ", "", x)) +
+  scale_shape_discrete(name = "Microbial generations\nper host gen",
+                       labels = function(x) sub("NGen = ", "", x)) +
+  labs(x = "Mean evolved importance (last 500 gens)",
+       y = "Standard deviation ratio")
+p_late
+```
+
+## A5. Microbiome rescue effect (`step_gen50`)
+
+```{r p-rescue, fig.width=6, fig.height=4.5}
+p_rescue <- ggplot(filter(late_rescue, EnvType == "step_gen50"),
+                   aes(x = evolved_imp, y = rescue_effect)) +
+  geom_point(size = 1.8, alpha = 0.6) +
+  geom_smooth(method = "lm", se = TRUE, linewidth = 0.9, colour = "black") +
+  labs(x = "Mean evolved importance (last 500 gens)",
+       y = "Microbiome Rescue Effect")
+p_rescue
+```
+
+## A6. Effective selection vs evolved importance
+
+```{r p-eff-comb, fig.width=12, fig.height=4.5}
+eff_data <- seff_late %>%
+  filter(selection_type == "Selective",
+         EnvType %in% c("step_gen1", "step_gen5", "step_gen50"),
+         !(X == "1" & EnvType == "step_gen1"))
+
+make_eff_plot <- function(df, title = NULL) {
+  ggplot(df, aes(x = evol_imp, y = s_with)) +
+    geom_point(alpha = 0.6) +
+    geom_smooth(method = "loess", se = FALSE, colour = "black") +
+    labs(x = "Mean evolved importance (last 500 gens)",
+         y = "Effective genotypic selection",
+         title = title)
+}
+
+eff_plots <- lapply(c("step_gen1", "step_gen5", "step_gen50"), function(et) {
+  make_eff_plot(filter(eff_data, EnvType == et), title = et)
+})
+names(eff_plots) <- c("step_gen1", "step_gen5", "step_gen50")
+
+eff_sel_comb <- Reduce(`+`, eff_plots) +
+  plot_layout(guides = "collect") +
+  plot_annotation(tag_levels = "a") &
+  theme(plot.tag = element_text(face = "bold"))
+eff_sel_comb
+```
+
+```{r save-eff-comb, include=FALSE}
+if (SAVE_FIGURES) ggsave(file.path(FIG_DIR, "eff_sel_plot.png"),
+                         eff_sel_comb, width = 18, height = 7, dpi = 300)
+```
+
+## A7. Combined three-panel headline figure
+
+```{r final-plot, fig.width=15, fig.height=5.5}
+final_plot <- (p_imp_traj |
+               (p_rescue +
+                  scale_color_discrete(name = "Microbial generations\nper host gen",
+                                       labels = c("1", "5", "50")) +
+                  scale_shape_discrete(name = "Microbial generations\nper host gen",
+                                       labels = c("1", "5", "50"))) |
+               eff_plots[["step_gen50"]]) +
+  plot_layout(guides = "collect") +
+  plot_annotation(tag_levels = "a") &
+  theme(plot.tag = element_text(face = "bold"),
+        legend.position = "left")
+final_plot
+```
+
+```{r save-final, include=FALSE}
+if (SAVE_FIGURES) ggsave(file.path(FIG_DIR, "full_combined_plot.png"),
+                         final_plot, width = 15, height = 6, dpi = 600)
+```
+
+## A8. Supplementary trajectory across all EnvTypes
+
+```{r supp-imp-traj, fig.width=12, fig.height=4}
+supp_p_imp_traj <- imp_traj_summary %>%
+  ggplot(aes(x = generation, y = mean_importance,
+             colour = factor(X), fill = factor(X), group = factor(X))) +
+  geom_ribbon(aes(ymin = lower_se, ymax = upper_se), alpha = 0.2, colour = NA) +
+  geom_line(linewidth = 0.7) +
+  geom_vline(xintercept = 2000, linetype = "dashed", colour = "grey50") +
+  scale_colour_brewer(palette = "Spectral", name = "Vertical\nInheritance (X)") +
+  scale_fill_brewer(palette = "Spectral",   name = "Vertical\nInheritance (X)") +
+  facet_grid(~ EnvType) +
+  labs(x = "Generation", y = "Mean Microbial Importance")
+supp_p_imp_traj
+```
+
+```{r save-supp, include=FALSE}
+if (SAVE_FIGURES) ggsave(file.path(FIG_DIR, "supp_imp_traj.png"),
+                         supp_p_imp_traj, width = 10, height = 4, dpi = 600)
+```
+
+## A9. Statistical models
+
+```{r imp-models}
+m_var <- lm(late_var_ratio ~ evolved_imp * X + EnvType + rep,
+            data = late_ratio)
+broom::tidy(m_var)   %>% knitr::kable(digits = 3, caption = "Var-ratio: coefficients")
+broom::glance(m_var) %>% knitr::kable(digits = 3, caption = "Var-ratio: fit")
+anova(m_var) %>% broom::tidy() %>%
+  knitr::kable(digits = 3, caption = "Var-ratio: ANOVA")
+
+m_rescue <- lm(rescue_effect ~ evolved_imp * X + EnvType + rep,
+               data = late_rescue)
+broom::tidy(m_rescue)   %>% knitr::kable(digits = 3, caption = "Rescue: coefficients")
+broom::glance(m_rescue) %>% knitr::kable(digits = 3, caption = "Rescue: fit")
+anova(m_rescue) %>% broom::tidy() %>%
+  knitr::kable(digits = 3, caption = "Rescue: ANOVA")
+```
+
+# Section B — Standard experiment
+
+```{r std-skip-check, results='asis', echo=FALSE}
+if (!run_standard_section) {
+  cat("> *Skipped — `standard_aggregated_data` is empty or the file does not exist.*\n",
+      "> Set the `standard_aggregated_data` parameter to the path of ",
+      "`combined_data_all_aggregated.RDS` to enable this section.\n", sep = "")
+}
+```
+
+```{r std-load, eval=run_standard_section}
+combined_data_all_aggregated <- readr::read_rds(STD_DATA_FILE) %>%
+  filter(EnvType %in% c("step_gen1", "step_gen5", "step_gen50")) %>%
+  mutate(
+    X_Fac     = as.factor(X),
+    GenFac    = as.factor(Generation),
+    ImportanceNumeric = as.numeric(gsub("importances_init", "", Importance)) * 2,
+    ImportanceLabel   = paste0("Importance=", ImportanceNumeric),
+    X_label   = case_when(
+      X == 0   ~ "No Inheritance (X=0)",
+      X == 0.1 ~ "Very Low Inheritance (X=0.1)",
+      X == 0.2 ~ "Low Inheritance (X=0.2)",
+      X == 0.3 ~ "Low-Moderate Inheritance (X=0.3)",
+      X == 0.4 ~ "Moderate Inheritance (X=0.4)",
+      X == 0.5 ~ "Moderate Inheritance (X=0.5)",
+      X == 0.9 ~ "High Inheritance (X=0.9)",
+      X == 1   ~ "Complete Inheritance (X=1)",
+      TRUE     ~ paste("X =", X)
+    )
+  )
+
+cat(sprintf("Loaded %d rows from %s\n",
+            nrow(combined_data_all_aggregated), STD_DATA_FILE))
+```
+
+## B1. Heatmap helpers
+
+```{r std-heatmap-helpers, eval=run_standard_section}
+presentation_theme <- function(base_size = 12, base_family = "") {
+  theme_minimal(base_size = base_size, base_family = base_family) +
+    theme(
+      plot.title       = element_text(size = base_size + 2, face = "bold", hjust = 0, margin = margin(b = 10)),
+      axis.title       = element_text(size = base_size, face = "bold", color = "black"),
+      axis.text        = element_text(size = base_size - 1, color = "black"),
+      legend.title     = element_text(size = base_size, face = "bold"),
+      legend.text      = element_text(size = base_size - 1),
+      legend.position  = "bottom",
+      strip.background = element_rect(fill = "gray95", color = "gray80", size = 0.5),
+      strip.text       = element_text(size = base_size, face = "bold", color = "black"),
+      panel.background = element_rect(fill = "white", color = NA),
+      panel.border     = element_rect(color = "gray80", fill = NA, size = 0.5),
+      panel.grid       = element_line(color = "gray90", size = 0.3),
+      plot.background  = element_rect(fill = "white", color = NA)
+    )
+}
+
+# Load env to compute env_value column for envplot.
+env_list <- readRDS(ENV_FILE)[1:3]
+get_env_value <- function(generation, env_type) {
+  env_matrix <- env_list[[env_type]]
+  env_values <- if (is.matrix(env_matrix)) env_matrix[, 1] else env_matrix
+  if (generation <= length(env_values)) env_values[generation] else NA
+}
+
+gens_of_int  <- 1900:2100
+label_gens   <- gens_of_int[seq(1, length(gens_of_int), by = 50)]
+
+heatmap_data <- combined_data_all_aggregated %>%
+  filter(Generation %in% gens_of_int) %>%
+  mutate(
+    ImportanceLabel = factor(ImportanceLabel,
+      levels = unique(ImportanceLabel)[order(as.numeric(gsub(".*=([0-9.]+).*", "\\1",
+                                                              unique(ImportanceLabel))))]),
+    ImportanceLabel = factor(stringr::str_wrap(ImportanceLabel, width = 20),
+      levels = stringr::str_wrap(levels(ImportanceLabel), width = 20)),
+    X_label = factor(X_label,
+      levels = unique(X_label)[order(as.numeric(gsub(".*=([0-9.]+).*", "\\1",
+                                                       unique(X_label))))])
+  ) %>%
+  rowwise() %>%
+  mutate(env_value = get_env_value(Generation, EnvType)) %>%
+  ungroup() %>%
+  filter(ImportanceNumeric %in% c(0, 0.02, 0.1, 0.2, 0.52, 0.8, 1))
+
+dashed_lines_data <- heatmap_data %>%
+  filter(EnvType == "step_gen50") %>%
+  distinct(EnvType) %>%
+  mutate(generation_line = 2000)
+
+create_heatmap <- function(data, fill_var, fill_name) {
+  ggplot(data, aes(x = factor(Generation), y = X_label, fill = !!sym(fill_var))) +
+    geom_tile(width = 2, linewidth = 0) +
+    geom_vline(data = dashed_lines_data,
+               aes(xintercept = match(generation_line, sort(unique(data$Generation)))),
+               linetype = "dashed", color = "black", alpha = 0.7) +
+    scale_fill_gradient2(
+      low = "#4575b4", mid = "#ffffbf", high = "#d73027",
+      midpoint = mean(range(data[[fill_var]], na.rm = TRUE)),
+      limits   = range(data[[fill_var]], na.rm = TRUE),
+      name     = fill_name
+    ) +
+    scale_x_discrete(breaks = label_gens, labels = label_gens, expand = c(0, 0)) +
+    facet_grid(vars(ImportanceLabel), vars(EnvType)) +
+    labs(x = "Generation", y = NULL) +
+    presentation_theme() +
+    theme(
+      axis.text.x   = element_text(angle = 90, hjust = 0.5, size = 9),
+      axis.text.y   = element_text(size = 9),
+      legend.position = "right",
+      strip.text.y  = element_text(angle = 0)
+    )
+}
+```
+
+## B2. Heatmap figures
+
+```{r std-heatmaps, eval=run_standard_section, fig.width=14, fig.height=8}
+ne_heatmap            <- create_heatmap(filter(heatmap_data, EnvType == "step_gen50"),
+                                        "Ne_mean", "Effective Population Size")
+hostfitness_heatmap   <- create_heatmap(heatmap_data, "HostFitness_mean",         "Host Fitness")
+microbefitness_heatmap<- create_heatmap(heatmap_data, "AvgMicrobialFitness_mean", "Microbe Fitness")
+microbebray_heatmap   <- create_heatmap(heatmap_data, "BrayDiv_mean",             "Bray-Curtis Dissimilarity")
+richness_heatmap      <- create_heatmap(heatmap_data, "SpeciesRichness_mean",     "Species Richness")
+diversity_heatmap     <- create_heatmap(heatmap_data, "HostAlphaDiversity_mean",  "Alpha Diversity")
+polymorphic_heatmap   <- create_heatmap(heatmap_data, "NumPolymorphicLoci_mean",  "Number of Polymorphic Loci")
+
+ne_heatmap
+hostfitness_heatmap
+microbefitness_heatmap
+microbebray_heatmap
+richness_heatmap
+diversity_heatmap
+polymorphic_heatmap
+```
+
+```{r save-std-heatmaps, eval=run_standard_section, include=FALSE}
+if (SAVE_FIGURES) {
+  ggsave(file.path(FIG_DIR, "ne_heatmap.png"),             ne_heatmap,             width = 16, height = 10)
+  ggsave(file.path(FIG_DIR, "hostfitness_heatmap.png"),    hostfitness_heatmap,    width = 16, height = 10)
+  ggsave(file.path(FIG_DIR, "microbefitness_heatmap.png"), microbefitness_heatmap, width = 16, height = 10)
+  ggsave(file.path(FIG_DIR, "microbebray_heatmap.png"),    microbebray_heatmap,    width = 16, height = 10)
+  ggsave(file.path(FIG_DIR, "richness_heatmap.png"),       richness_heatmap,       width = 16, height = 10)
+  ggsave(file.path(FIG_DIR, "diversity_heatmap.png"),      diversity_heatmap,      width = 16, height = 10)
+  ggsave(file.path(FIG_DIR, "polymorphic_heatmap.png"),    polymorphic_heatmap,    width = 16, height = 10)
+}
+```
+
+## B3. Importance-as-linear-predictor plots (`step_gen50`, X = 0.9)
+
+```{r std-lm-plots, eval=run_standard_section, fig.width=14, fig.height=5}
+TIME_PERIOD_1_END <- 2000
+TIME_PERIOD_2_END <- 2010
+PERIOD_1_LABEL <- "Pre-Change (Baseline) (1990-1999)"
+PERIOD_2_LABEL <- "Immediate Post Change (2000-2010)"
+PERIOD_3_LABEL <- "Late Post Change (2011-2020)"
+
+linear_datasets <- combined_data_all_aggregated %>%
+  filter(EnvType == "step_gen50", X == 0.9, Generation %in% 1990:2020) %>%
+  mutate(
+    time_period = factor(case_when(
+      Generation <  TIME_PERIOD_1_END ~ PERIOD_1_LABEL,
+      Generation <= TIME_PERIOD_2_END ~ PERIOD_2_LABEL,
+      TRUE                            ~ PERIOD_3_LABEL
+    ), levels = c(PERIOD_1_LABEL, PERIOD_2_LABEL, PERIOD_3_LABEL)),
+    ImportanceNumeric = as.numeric(ImportanceNumeric)
+  )
+
+time_colors <- c("#2166AC", "#D73027", "#33A02C")
+time_shapes <- c(16, 17, 15)
+
+mk_lm_plot <- function(data, y_var, y_label) {
+  ggplot(data, aes(x = ImportanceNumeric, y = !!sym(y_var),
+                   color = time_period, shape = time_period)) +
+    geom_point(size = 2.5, alpha = 0.1) +
+    geom_smooth(method = "lm", se = TRUE, alpha = 0.1, linewidth = 1.2) +
+    scale_color_manual(values = time_colors, name = "Time Period") +
+    scale_shape_manual(values = time_shapes, name = "Time Period") +
+    labs(x = "Microbiome Importance", y = y_label) +
+    theme_minimal() +
+    theme(legend.direction = "horizontal")
+}
+
+ne_LM         <- mk_lm_plot(linear_datasets, "Ne_mean",                 "Ne")
+polymorphic_LM<- mk_lm_plot(linear_datasets, "NumPolymorphicLoci_mean", "Number of\nPolymorphic Loci")
+Bray_LM       <- mk_lm_plot(linear_datasets, "BrayDiv_mean",            "Bray-Curtis\nDissimilarity")
+
+combined_lm_plot <- (ne_LM + theme(legend.position = "none") |
+                     polymorphic_LM + theme(legend.position = "none") |
+                     Bray_LM) / guide_area() +
+  plot_layout(heights = c(10, 1), guides = "collect") +
+  plot_annotation(tag_levels = "a") &
+  theme(plot.tag = element_text(size = 16, face = "bold"))
+
+combined_lm_plot
+```
+
+```{r save-std-lm, eval=run_standard_section, include=FALSE}
+if (SAVE_FIGURES) ggsave(file.path(FIG_DIR, "plot_combined_unified.png"),
+                         combined_lm_plot, width = 15, height = 5, dpi = 600)
+```
+
+## B4. Three-row metric grid (`step_gen50`, faceted by importance)
+
+Three stacked rows of heatmaps — host fitness, polymorphic loci, and
+Bray–Curtis — restricted to `EnvType == "step_gen50"` and to a subset of
+importance levels, with one column per importance value labelled (a)
+through (r). This is the `step50_labels_outside.png` figure from
+`rewritten_analysiscode_Feb10.R`.
+
+```{r std-step50-rows, eval=run_standard_section, fig.width=17, fig.height=8}
+# Prepare step_gen50-only data; n_facets = number of importance levels
+# (minus 1 to match the original; letter offsets stride across the rows).
+step50_data <- heatmap_data %>% filter(EnvType == "step_gen50")
+n_facets    <- length(unique(step50_data$ImportanceLabel)) - 1
+step50_data$X_label <- paste0("italic(X) == ", step50_data$X)
+
+create_metric_row <- function(data, fill_var, fill_name, label_offset = 0,
+                              show_x_axis = FALSE, show_y_label = FALSE,
+                              show_importance = FALSE) {
+
+  unique_levs <- sort(unique(data$ImportanceLabel))
+  letter_vec  <- letters[(1:n_facets) + label_offset]
+  names(letter_vec) <- unique_levs
+
+  p <- ggplot(data, aes(x = factor(Generation), y = X_label, fill = !!sym(fill_var))) +
+    scale_y_discrete(labels = function(x) parse(text = x)) +
+    geom_tile(width = 2, linewidth = 0) +
+    geom_vline(data = dashed_lines_data,
+               aes(xintercept = match(generation_line, sort(unique(data$Generation)))),
+               linetype = "dashed", color = "black", alpha = 0.7) +
+    scale_fill_gradient2(
+      low = "#4575b4", mid = "#ffffbf", high = "#d73027",
+      midpoint = mean(range(data[[fill_var]], na.rm = TRUE)),
+      name = fill_name
+    ) +
+    scale_x_discrete(breaks = label_gens, labels = label_gens, expand = c(0, 0)) +
+    facet_grid(. ~ ImportanceLabel,
+               labeller = labeller(ImportanceLabel = letter_vec)) +
+    labs(x = if (show_x_axis) "Generation" else NULL,
+         y = if (show_y_label) expression(Vertical ~ Inheritance ~ (italic(X))) else NULL) +
+    presentation_theme() +
+    theme(
+      strip.background = element_blank(),
+      strip.text.x     = element_text(size = 12, face = "bold", hjust = 0),
+      axis.text.x      = if (show_x_axis) element_text(angle = 90, hjust = 0.5, size = 8) else element_blank(),
+      axis.ticks.x     = if (show_x_axis) element_line() else element_blank(),
+      axis.text.y      = element_text(size = 8),
+      axis.title.y     = if (show_y_label) element_text(size = 12, face = "bold") else element_blank(),
+      panel.border     = element_rect(color = "gray80", fill = NA, linewidth = 0.5),
+      panel.spacing    = unit(0.5, "lines"),
+      legend.position  = "right",
+      plot.margin      = margin(b = 2, t = if (show_importance) 25 else 8, l = 5, r = 5)
+    )
+
+  if (show_importance) {
+    importance_data <- data %>%
+      select(ImportanceLabel, ImportanceNumeric) %>%
+      distinct() %>%
+      arrange(ImportanceLabel)
+    n_generations <- length(unique(data$Generation))
+    mid_x <- ceiling(n_generations / 2)
+
+    p <- p +
+      geom_text(data = importance_data,
+                aes(x = mid_x, y = Inf,
+                    label = paste0("Importance = ", ImportanceNumeric)),
+                inherit.aes = FALSE,
+                vjust = -1.5, hjust = 0.5,
+                size  = 4, fontface = "italic") +
+      coord_cartesian(clip = "off")
+  }
+
+  return(p)
+}
+
+# Subset of importance levels shown across the three rows
+imp_levels_show <- c(0, 0.1, 0.2, 0.52, 0.8, 1)
+
+row1 <- create_metric_row(
+  step50_data %>% filter(ImportanceNumeric %in% imp_levels_show),
+  "HostFitness_mean", "Host Fitness", 0, FALSE, FALSE, show_importance = TRUE)
+
+row4 <- create_metric_row(
+  step50_data %>% filter(ImportanceNumeric %in% imp_levels_show),
+  "NumPolymorphicLoci_mean", "Polymorphic Loci", n_facets, FALSE, TRUE)
+
+row2 <- create_metric_row(
+  step50_data %>% filter(ImportanceNumeric %in% imp_levels_show),
+  "BrayDiv_mean", "Bray-Curtis", n_facets * 2, TRUE, FALSE)
+
+final_plot_external <- (row1 / row4 / row2) +
+  plot_layout(guides = "collect") &
+  theme(legend.justification = "left")
+
+final_plot_external
+```
+
+```{r save-std-step50-rows, eval=run_standard_section, include=FALSE}
+if (SAVE_FIGURES) ggsave(file.path(FIG_DIR, "step50_labels_outside.png"),
+                         final_plot_external, width = 17, height = 8, dpi = 800)
+```
+
+# Saved figures
+
+```{r list-saved, echo=FALSE}
+if (SAVE_FIGURES) {
+  saved <- list.files(FIG_DIR, full.names = TRUE)
+  if (length(saved) > 0) {
+    cat("Saved to ", normalizePath(FIG_DIR), ":\n", sep = "")
+    for (f in saved) cat("  ", basename(f),
+                         " (", round(file.info(f)$size / 1024, 1), " KB)\n", sep = "")
+  } else {
+    cat("No figures saved.\n")
+  }
+} else {
+  cat("Figure-saving disabled.\n")
+}
+```
+
+# Session info
+
+```{r sessioninfo}
+sessionInfo()
+```

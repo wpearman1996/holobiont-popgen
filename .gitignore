@@ -44,3 +44,6 @@ Thumbs.db
 .idea/
 *.swp
 *~
+.Rproj.user
+.httr-oauth
+.quarto
