@@ -28,7 +28,6 @@ sourceCpp_*
 
 # RMarkdown caches and outputs
 *_cache/
-*_files/
 *.html
 !analysis/*.Rmd
 
