@@ -145,6 +145,12 @@ fresh clone you'll need to either:
 
 The two Rmds in `analysis/` are written to be path-portable and don't
 require any edits.
+## Use of artificial intelligence note
+
+Note that Claude Opus 4.7 was used to organize code and generate test case scenarios 
+presented in this repo. Similarly, AI was used to help produce C++ function equivalents
+of original R code to help simulation efficiency. AI code was validated against R code to
+confirm functionality.
 
 ## Citation
 
