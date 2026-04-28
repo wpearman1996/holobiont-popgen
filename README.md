@@ -2,28 +2,24 @@
 
 Forward-time individual-based simulation of holobiont evolution: a host
 population in which each individual carries its own microbial community,
-and where host fitness depends on a weighted blend of the host's own
+and where host fitness depends on a weighted contributed of the host's own
 genetically-encoded trait and the mean trait of its microbiome.
 
-The simulation is R-driven with hot loops in C++ (via Rcpp), and is set
-up to run as a SLURM job array on an HPC cluster — one array task per
-parameter combination × replicate.
 
-## Two experiments
+## Two sets of simulations
 
-The repo contains the code for two related experiments. Each lives in
-its own subfolder, with its own simulation engine, parameter sweep,
-and analysis scripts. The code is preserved as it was used to produce
-the published results.
+The repo contains the code for two related simulation setups. Each is within
+its own subfolder, with its own source code, parameter sweep,
+and analysis scripts. 
 
 | Folder                  | What it sweeps                                  | Generations | Tasks |
 |-------------------------|-------------------------------------------------|------------:|------:|
 | `standard/`             | Vertical inheritance × env-change × *fixed* initial importance values (30 levels from 0 to 0.5). Importance does not mutate. | 3000        | 240   |
 | `importance_mutation/`  | Vertical inheritance × env-change × selective vs neutral, with importance free to mutate from an initial value of 0. | 8000        | 720   |
 
-The two engines share most C++ kernels but the `importance_mutation/`
+The two setups are largely identicaly but the `importance_mutation/`
 variant adds a `metabolic_cost` argument to the host-fitness function
-and a `step_size` parameter to the trait mutator.
+and a `step_size` parameter to the trait mutator (the metabolic cost is not used).
 
 ## Repository layout
 
@@ -66,9 +62,8 @@ holobiont-popgen/
 Only one binary file is bundled in the repo: `data/env_list_rerun.RDS`,
 a 1.2 MB named list of three environment-trajectory matrices (`step_gen1`,
 `step_gen5`, `step_gen50`) used by both experiments. The simulation
-*outputs* (one ~10 MB RDS per task × ~7,000 tasks total) are *not*
-included — they're produced by running the SLURM jobs. The `.gitignore`
-keeps these out of the repo.
+*outputs* (one ~1 GB RDS per task × ~7,000 tasks total) are *not*
+included — they are produced by running the simulations
 
 ## Quick start
 
