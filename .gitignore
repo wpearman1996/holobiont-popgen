@@ -1,0 +1,46 @@
+# Simulation outputs (large; produced by SLURM jobs)
+results_*/
+extracted_*/
+combined_data*.RDS
+indiv_data*.RDS
+
+# But keep the bundled env file
+!data/env_list_rerun.RDS
+
+# Logs
+logs/
+*.log
+*.out
+*.err
+slurm-*.out
+
+# Compiled C++ artefacts from Rcpp::sourceCpp
+*.o
+*.so
+*.dll
+sourceCpp_*
+
+# R session
+.Rhistory
+.RData
+.Rproj.user/
+*.Rproj
+
+# RMarkdown caches and outputs
+*_cache/
+*_files/
+*.html
+!analysis/*.Rmd
+
+# Jupyter checkpoints (carry-over from original)
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
